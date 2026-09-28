@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 @testable import AdaptiveTransfer
 
 final class TransferManifestTests: XCTestCase {
@@ -121,6 +122,47 @@ final class TransferManifestTests: XCTestCase {
         XCTAssertEqual(decoded.acknowledged, [0, 2])
         XCTAssertEqual(decoded.digest(forChunkIndex: 0), ContentDigest(value: 7))
         XCTAssertNil(decoded.digest(forChunkIndex: 2))
+    }
+
+    /// The other entry path. A synthesized `init(from:)` writes straight to the
+    /// stored properties and honours no invariant, so a manifest file truncated
+    /// by a crash or written by an older build could decode with a negative
+    /// chunk count and a hundred thousand acknowledged indices — and
+    /// `isComplete` would then be `true` for a transfer that uploaded nothing.
+    func testDecodingRejectsOutOfRangeStateRatherThanTrustingIt() throws {
+        let hostile = """
+        {
+          "transferID": "t1",
+          "chunkCount": -5,
+          "chunkSize": -100,
+          "fingerprint": {
+            "totalBytes": 10,
+            "prefixDigest": { "value": 1 },
+            "prefixByteCount": 10
+          },
+          "acknowledgedIndices": [0, 1, 2, 999999, -3],
+          "digests": { "999999": { "value": 7 } }
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            TransferManifest.self,
+            from: Data(hostile.utf8)
+        )
+        XCTAssertEqual(decoded.chunkCount, 0)
+        XCTAssertEqual(decoded.chunkSize, 0)
+        XCTAssertEqual(decoded.acknowledged, [])
+        XCTAssertNil(decoded.digest(forChunkIndex: 999_999))
+    }
+
+    func testDecodingKeepsIndicesThatAreInRange() throws {
+        var manifest = TransferManifest(
+            transferID: "t1", chunkCount: 4, chunkSize: 100, fingerprint: fingerprint("v1")
+        )
+        manifest.acknowledge(chunkIndex: 3, digest: ContentDigest(value: 9))
+        let data = try JSONEncoder().encode(manifest)
+        let decoded = try JSONDecoder().decode(TransferManifest.self, from: data)
+        XCTAssertEqual(decoded.acknowledged, [3])
+        XCTAssertEqual(decoded.digest(forChunkIndex: 3), ContentDigest(value: 9))
     }
 
     func testFingerprintReadsABoundedPrefix() {

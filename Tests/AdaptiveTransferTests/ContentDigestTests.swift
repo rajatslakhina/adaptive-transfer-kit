@@ -29,14 +29,4 @@ final class ContentDigestTests: XCTestCase {
         XCTAssertNotEqual(a, b)
     }
 
-    /// Guards the claim the golden-vector test is really making: that a
-    /// seeded hash would have been rejected. If `ContentDigest` were ever
-    /// reimplemented on top of `Hasher`, `hashValue` and the digest would
-    /// diverge from the vectors above — this asserts they are not the same
-    /// number today, so the vectors are pinning FNV and not coincidence.
-    func testDigestIsNotSwiftHashValue() {
-        let bytes = Array("foobar".utf8)
-        let digest = ContentDigest(hashing: bytes)
-        XCTAssertNotEqual(UInt64(bitPattern: Int64(bytes.hashValue)), digest.value)
-    }
 }

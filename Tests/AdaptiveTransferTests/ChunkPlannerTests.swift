@@ -63,6 +63,28 @@ final class ChunkPlannerTests: XCTestCase {
         XCTAssertEqual(configuration.maximumChunkCount, 1)
     }
 
+    /// `ChunkDescriptor` is public and `Codable`, so its initializer's
+    /// arguments can arrive from a decoded manifest rather than from the
+    /// planner. A negative `byteCount` used to produce a `Range` whose lower
+    /// bound exceeded its upper bound, and `Range.init` traps on that — a
+    /// crash reachable straight through the public API, in a package whose
+    /// README claims no arithmetic can trap.
+    func testChunkDescriptorClampsItsInputsAndItsRangeNeverTraps() {
+        let negative = ChunkDescriptor(index: -1, offset: -100, byteCount: -1)
+        XCTAssertEqual(negative.index, 0)
+        XCTAssertEqual(negative.offset, 0)
+        XCTAssertEqual(negative.byteCount, 0)
+        XCTAssertEqual(negative.range, 0..<0)
+
+        let overflowing = ChunkDescriptor(index: 0, offset: Int.max, byteCount: Int.max)
+        XCTAssertEqual(overflowing.range.lowerBound, Int.max)
+        XCTAssertEqual(overflowing.range.upperBound, Int.max)
+        XCTAssertTrue(overflowing.range.isEmpty)
+
+        let ordinary = ChunkDescriptor(index: 2, offset: 200, byteCount: 100)
+        XCTAssertEqual(ordinary.range, 200..<300)
+    }
+
     func testSmallPayloadUsesThePreferredSize() {
         let planner = ChunkPlanner(
             configuration: .init(preferredChunkSize: 4_096, minimumChunkSize: 512)

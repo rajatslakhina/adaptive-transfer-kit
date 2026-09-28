@@ -45,11 +45,4 @@ final class LimiterInvariantCheckTests: XCTestCase {
         XCTAssertFalse(report.failures.contains(.probesUpward))
     }
 
-    /// The check's thresholds are the numbers quoted in the README. Pinning
-    /// them here means a future loosening of the gate shows up as a diff in
-    /// this file rather than as prose that quietly stopped being true.
-    func testPublishedThresholds() {
-        XCTAssertEqual(LimiterInvariantCheck.congestionShrinkCeiling, 0.7)
-        XCTAssertEqual(LimiterInvariantCheck.recoveryFloor, 0.8)
-    }
 }

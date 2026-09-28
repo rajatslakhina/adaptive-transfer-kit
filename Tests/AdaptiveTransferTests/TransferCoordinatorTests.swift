@@ -77,6 +77,18 @@ private final actor ConcurrencyWitness: ChunkTransport {
     }
 }
 
+/// Succeeds, but slowly enough that a second caller can overlap it.
+private final actor SlowTransport: ChunkTransport {
+    func send(chunk: ChunkDescriptor, transferID: String) async throws -> ChunkReceipt {
+        try? await Task.sleep(for: .milliseconds(50))
+        return ChunkReceipt(
+            chunkIndex: chunk.index,
+            digest: ContentDigest(value: UInt64(truncatingIfNeeded: chunk.index)),
+            roundTrip: .milliseconds(40)
+        )
+    }
+}
+
 final class TransferCoordinatorTests: XCTestCase {
 
     private let planner = ChunkPlanner(
@@ -271,6 +283,60 @@ final class TransferCoordinatorTests: XCTestCase {
             "a shared pool is supposed to run out and abandon healthy chunks"
         )
         XCTAssertFalse(strictOutcome.terminallyFailedChunks.isEmpty)
+    }
+
+    /// The corruption the claim flag exists to prevent, reproduced against the
+    /// fixed implementation.
+    ///
+    /// Before `claim()`, two concurrent `upload(_:)` calls on one coordinator
+    /// raced across the `await store.load(...)` suspension: `resolve()` reset
+    /// the limiter, scheduler, budget and manifest mid-flight, and the first
+    /// call then returned the *second* transfer's manifest as its own result —
+    /// a 50-chunk upload reporting `isComplete == true` while carrying a
+    /// 3-chunk manifest, with no error raised anywhere.
+    func testASecondConcurrentUploadIsRejectedRatherThanCorruptingTheFirst() async throws {
+        let transport = SlowTransport()
+        let coordinator = TransferCoordinator(
+            transport: transport,
+            planner: planner,
+            policy: fastPolicy
+        )
+
+        // Both requests are built before the `async let`, so the concurrent
+        // closure captures a `Sendable` value rather than the test case.
+        let requestA = request("A", totalBytes: 5_000, payload: "A")
+        let requestB = request("B", totalBytes: 300, payload: "B")
+
+        async let first = coordinator.upload(requestA)
+        // Long enough for the first call to get past its `await store.load`,
+        // short enough that it is still running: 50 chunks at 50 ms each,
+        // bounded by the limiter, takes several hundred milliseconds.
+        try await Task.sleep(for: .milliseconds(30))
+
+        do {
+            _ = try await coordinator.upload(requestB)
+            XCTFail("a second concurrent upload must not be admitted")
+        } catch let error as TransferCoordinatorError {
+            XCTAssertEqual(error, .busy)
+        }
+
+        let outcome = try await first
+        XCTAssertEqual(outcome.transferID, "A")
+        XCTAssertEqual(outcome.manifest.transferID, "A", "the manifest belonged to another transfer")
+        XCTAssertEqual(outcome.manifest.chunkCount, 50)
+        XCTAssertTrue(outcome.isComplete)
+    }
+
+    /// And the claim is released, so the coordinator is reusable.
+    func testTheClaimIsReleasedAfterATransferFinishes() async throws {
+        let coordinator = TransferCoordinator(
+            transport: ScriptedTransport(),
+            planner: planner,
+            policy: fastPolicy
+        )
+        _ = try await coordinator.upload(request("A", payload: "A"))
+        let second = try await coordinator.upload(request("B", payload: "B"))
+        XCTAssertTrue(second.isComplete)
     }
 
     /// The limit is meant to bound real concurrency, not just be reported. A

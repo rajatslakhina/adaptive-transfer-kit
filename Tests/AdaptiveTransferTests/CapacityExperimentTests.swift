@@ -6,11 +6,60 @@ import XCTest
 /// quietly stops being true.
 final class CapacityExperimentTests: XCTestCase {
 
-    func testSimulationIsDeterministic() {
-        let first = CapacityExperiment.compare()
-        let second = CapacityExperiment.compare()
-        XCTAssertEqual(first.fixed, second.fixed)
-        XCTAssertEqual(first.adaptive, second.adaptive)
+    /// Pins every figure the library README publishes.
+    ///
+    /// The earlier version of this test ran `compare()` twice in one process
+    /// and asserted the results matched — which passes for any deterministic
+    /// function, including one that returns a constant, and would not have
+    /// noticed the table going stale. Exact expected values are the only form
+    /// of this test that does anything: change the control law and this file
+    /// turns red, which is what the README's claim to that effect requires.
+    func testPublishedFiguresAreExact() {
+        let comparison = CapacityExperiment.compare()
+
+        XCTAssertEqual(comparison.fixed.completedChunks, 300)
+        XCTAssertEqual(comparison.fixed.droppedRequests, 0)
+        XCTAssertEqual(comparison.fixed.completionMilliseconds, 5_400)
+        XCTAssertEqual(comparison.fixed.medianLatencyMilliseconds, 160)
+        XCTAssertEqual(comparison.fixed.p95LatencyMilliseconds, 160)
+        XCTAssertEqual(comparison.fixed.p99LatencyMilliseconds, 160)
+        XCTAssertEqual(comparison.fixed.peakInFlight, 8)
+        XCTAssertEqual(comparison.fixed.finalLimit, 8)
+
+        XCTAssertEqual(comparison.adaptive.completedChunks, 300)
+        XCTAssertEqual(comparison.adaptive.droppedRequests, 12)
+        XCTAssertEqual(comparison.adaptive.completionMilliseconds, 5_775)
+        XCTAssertEqual(comparison.adaptive.medianLatencyMilliseconds, 80)
+        XCTAssertEqual(comparison.adaptive.p95LatencyMilliseconds, 100)
+        XCTAssertEqual(comparison.adaptive.p99LatencyMilliseconds, 705)
+        XCTAssertEqual(comparison.adaptive.peakInFlight, 22)
+        XCTAssertEqual(comparison.adaptive.finalLimit, 4)
+    }
+
+    /// The other two rows of the README's table.
+    func testPublishedCollapseFiguresAreExact() {
+        let sixteen = CapacityExperiment.run(
+            limiter: FixedLimiter(16),
+            scenario: .capacityCollapsesMidTransfer
+        )
+        XCTAssertEqual(sixteen.completedChunks, 55)
+        XCTAssertEqual(sixteen.droppedRequests, 29_985)
+
+        let thirtyTwo = CapacityExperiment.run(
+            limiter: FixedLimiter(32),
+            scenario: .capacityCollapsesMidTransfer
+        )
+        XCTAssertEqual(thirtyTwo.completedChunks, 71)
+        XCTAssertEqual(thirtyTwo.droppedRequests, 29_977)
+
+        let four = CapacityExperiment.run(
+            limiter: FixedLimiter(4),
+            scenario: .capacityCollapsesMidTransfer
+        )
+        XCTAssertEqual(four.completedChunks, 300)
+        XCTAssertEqual(four.droppedRequests, 0)
+        XCTAssertEqual(four.completionMilliseconds, 5_800)
+        XCTAssertEqual(four.p95LatencyMilliseconds, 80)
     }
 
     func testBothStrategiesCompleteEveryChunk() {
@@ -66,19 +115,27 @@ final class CapacityExperimentTests: XCTestCase {
         XCTAssertEqual(result.throughputPerSecond, 0)
     }
 
-    func testPercentilesAreInRangeAndOrdered() {
-        let result = CapacityExperiment.run(
-            limiter: GradientLimiter(),
-            scenario: .capacityCollapsesMidTransfer
+    /// `percentile` is nearest-rank over a sorted array, so asserting
+    /// `p50 <= p95 <= p99` would be asserting something the implementation
+    /// computes by construction. These are the cases where it could actually be
+    /// wrong: the clamps at both ends, and a known fixture where the answer can
+    /// be worked out by hand.
+    func testPercentileIsNearestRankAndClampsItsInput() {
+        let result = CapacityExperiment.Result(
+            completionMilliseconds: 1_000,
+            completedChunks: 10,
+            droppedRequests: 0,
+            latenciesMilliseconds: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            peakInFlight: 4,
+            finalLimit: 4
         )
-        XCTAssertLessThanOrEqual(
-            result.medianLatencyMilliseconds, result.p95LatencyMilliseconds
-        )
-        XCTAssertLessThanOrEqual(
-            result.p95LatencyMilliseconds, result.p99LatencyMilliseconds
-        )
-        XCTAssertEqual(result.percentile(-10), result.latenciesMilliseconds.first)
-        XCTAssertEqual(result.percentile(500), result.latenciesMilliseconds.last)
+        XCTAssertEqual(result.percentile(50), 50)     // rank 5 -> index 4
+        XCTAssertEqual(result.percentile(95), 90)      // rank 9 (integer division) -> index 8
+        XCTAssertEqual(result.percentile(10), 10)
+        XCTAssertEqual(result.percentile(100), 100)
+        XCTAssertEqual(result.percentile(0), 10)      // clamped to the first
+        XCTAssertEqual(result.percentile(-10), 10)    // clamped, must not trap
+        XCTAssertEqual(result.percentile(500), 100)   // clamped, must not trap
     }
 
     /// The horizon is the only thing between a wedged limiter and an infinite
