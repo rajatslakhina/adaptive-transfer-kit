@@ -22,9 +22,25 @@ public struct ChunkDescriptor: Sendable, Equatable, Hashable, Codable {
         self.byteCount = max(0, byteCount)
     }
 
-    /// Byte range, half-open. Never trapping: `byteCount` is non-negative by
-    /// construction and the upper bound saturates rather than overflowing, so
-    /// `lowerBound <= upperBound` always holds.
+    /// Decoding routes through the clamping initializer.
+    ///
+    /// The synthesized `init(from:)` writes the stored properties directly and
+    /// honours nothing, so the clamp above would have protected only callers
+    /// who used the memberwise initializer — that is, not the path the clamp
+    /// exists for. An invariant enforced on one of a type's two entry points
+    /// is not enforced.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            index: try container.decode(Int.self, forKey: .index),
+            offset: try container.decode(Int.self, forKey: .offset),
+            byteCount: try container.decode(Int.self, forKey: .byteCount)
+        )
+    }
+
+    /// Byte range, half-open. Never trapping: `byteCount` is non-negative on
+    /// both entry paths and the upper bound saturates rather than overflowing,
+    /// so `lowerBound <= upperBound` always holds.
     public var range: Range<Int> {
         let upper = Saturating.add(offset, byteCount)
         return offset..<max(offset, upper)

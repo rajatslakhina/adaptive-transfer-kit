@@ -23,6 +23,15 @@
 public struct CapacityExperiment: Sendable {
 
     public struct Scenario: Sendable {
+        /// Ceiling on `chunkCount`.
+        ///
+        /// `run` materialises one element per chunk before the loop starts, so
+        /// an unbounded count is an allocation the caller chose by accident.
+        /// `ChunkPlanner` caps its plan for the same reason and this type is
+        /// its sibling; leaving one of the two uncapped is how a public API
+        /// ends up with a segfault behind an innocuous-looking `Int`.
+        public static let maximumChunkCount = 1_000_000
+
         public let chunkCount: Int
         public let server: SimulatedServer
         /// Safety valve: the simulation stops here rather than looping forever
@@ -34,7 +43,7 @@ public struct CapacityExperiment: Sendable {
             server: SimulatedServer,
             horizonMilliseconds: Int = 600_000
         ) {
-            self.chunkCount = max(0, chunkCount)
+            self.chunkCount = min(max(0, chunkCount), Self.maximumChunkCount)
             self.server = server
             self.horizonMilliseconds = max(1, horizonMilliseconds)
         }
@@ -83,9 +92,19 @@ public struct CapacityExperiment: Sendable {
             return Double(completedChunks) * 1000.0 / Double(completionMilliseconds)
         }
 
-        /// Nearest-rank percentile. `0` for an empty sample rather than a
-        /// crash: an experiment that admitted nothing has no latency, and a
-        /// trap here would turn a scheduling bug into a crash report.
+        /// Floor-rank percentile: `index = floor(p * n / 100) - 1`, clamped
+        /// into the array.
+        ///
+        /// Named for what it does rather than for the textbook method it
+        /// resembles. It is *not* nearest-rank, which would round the rank up;
+        /// for the 300-sample runs this package publishes the two agree
+        /// exactly, but calling it nearest-rank in a doc comment and then
+        /// asserting the floor answer in a test is how a definition quietly
+        /// becomes "whatever the code did".
+        ///
+        /// `0` for an empty sample rather than a crash: an experiment that
+        /// admitted nothing has no latency, and a trap here would turn a
+        /// scheduling bug into a crash report.
         public func percentile(_ percentile: Int) -> Int {
             guard !latenciesMilliseconds.isEmpty else { return 0 }
             let clamped = min(max(percentile, 0), 100)

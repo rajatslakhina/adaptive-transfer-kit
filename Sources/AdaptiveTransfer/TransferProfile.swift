@@ -46,7 +46,12 @@ public struct TransferProfile: Sendable, Equatable {
         degradeAtMilliseconds: Int = 200
     ) {
         self.name = name
-        self.chunkCount = max(1, chunkCount)
+        // Bounded for the same reason `CapacityExperiment.Scenario` is: the
+        // simulation materialises one element per chunk.
+        self.chunkCount = min(
+            max(1, chunkCount),
+            CapacityExperiment.Scenario.maximumChunkCount
+        )
         self.fixedLimit = max(1, fixedLimit)
         self.serverCapacity = max(1, serverCapacity)
         self.serviceTimeMilliseconds = max(1, serviceTimeMilliseconds)

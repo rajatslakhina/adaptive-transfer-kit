@@ -125,6 +125,7 @@ public actor TransferCoordinator {
     private let store: any ManifestStore
     private let budgetShape: RetryBudget.Shape
     private let limiterConfiguration: GradientLimiter.Configuration
+    private let schedulerConfiguration: TransferScheduler.Configuration?
 
     public init(
         transport: any ChunkTransport,
@@ -132,7 +133,14 @@ public actor TransferCoordinator {
         policy: RetryPolicy = .default,
         store: any ManifestStore = InMemoryManifestStore(),
         budgetShape: RetryBudget.Shape = .perChunk(globalBackstop: 1024),
-        limiterConfiguration: GradientLimiter.Configuration = .uploadPipeline
+        limiterConfiguration: GradientLimiter.Configuration = .uploadPipeline,
+        /// Leave `nil` to size the queue from the plan. Two independently
+        /// configurable caps — the planner's `maximumChunkCount` and the
+        /// scheduler's `maximumQueuedItems` — is a trap: raise the first for
+        /// finer resumption granularity on a large file and the second
+        /// silently starts refusing work. Deriving one from the other removes
+        /// the interaction rather than documenting it.
+        schedulerConfiguration: TransferScheduler.Configuration? = nil
     ) {
         self.transport = transport
         self.planner = planner
@@ -140,6 +148,7 @@ public actor TransferCoordinator {
         self.store = store
         self.budgetShape = budgetShape
         self.limiterConfiguration = limiterConfiguration
+        self.schedulerConfiguration = schedulerConfiguration
     }
 
     /// Mutable state. Only the `-- critical section --` methods below touch it,
@@ -249,7 +258,14 @@ public actor TransferCoordinator {
     ) -> TransferManifest.ResumeDecision {
         limiter = GradientLimiter(configuration: limiterConfiguration)
         budget = RetryBudget(shape: budgetShape)
-        scheduler = TransferScheduler()
+        scheduler = TransferScheduler(
+            configuration: schedulerConfiguration ?? .init(
+                maximumQueuedItems: max(
+                    TransferScheduler.Configuration.default.maximumQueuedItems,
+                    Saturating.add(plan.count, 1)
+                )
+            )
+        )
         terminalChunks = []
 
         let base = stored ?? TransferManifest(
@@ -276,13 +292,22 @@ public actor TransferCoordinator {
         }
 
         for descriptor in decision.chunks {
-            scheduler.enqueue(
+            let accepted = scheduler.enqueue(
                 ChunkWorkItem(
                     transferID: request.transferID,
                     descriptor: descriptor,
                     priority: request.priority
                 )
             )
+            // Checked, not discarded. `enqueue` refuses past its cap, and a
+            // dropped descriptor here would end the transfer neither complete
+            // nor with that index reported as failed — the one outcome this
+            // package must never produce, and the one the retry path was
+            // already fixed for. The scheduler is now also sized from the plan
+            // (see `init`), so this branch should be unreachable; it is
+            // reported rather than assumed, because the previous version of
+            // this loop was also "obviously fine".
+            if !accepted { terminalChunks.insert(descriptor.index) }
         }
         return decision
     }

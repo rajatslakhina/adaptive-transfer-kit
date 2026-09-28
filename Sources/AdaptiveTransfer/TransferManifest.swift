@@ -146,7 +146,21 @@ public struct TransferManifest: Sendable, Equatable, Codable {
         self.transferID = try container.decode(String.self, forKey: .transferID)
         let decodedChunkCount = try container.decode(Int.self, forKey: .chunkCount)
         let decodedChunkSize = try container.decode(Int.self, forKey: .chunkSize)
-        self.chunkCount = max(0, decodedChunkCount)
+
+        // A negative chunk count is *corruption*, and clamping it to zero would
+        // quietly turn it into a legitimately-empty manifest — which
+        // `isComplete` reports as complete, which is the exact symptom this
+        // initializer was written to remove. An empty plan and a damaged file
+        // are different things, so the damaged one is refused rather than
+        // rounded into the harmless one.
+        guard decodedChunkCount >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .chunkCount,
+                in: container,
+                debugDescription: "negative chunkCount (\(decodedChunkCount)); manifest is damaged"
+            )
+        }
+        self.chunkCount = decodedChunkCount
         self.chunkSize = max(0, decodedChunkSize)
         self.fingerprint = try container.decode(SourceFingerprint.self, forKey: .fingerprint)
 
