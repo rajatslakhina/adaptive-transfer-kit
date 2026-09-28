@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux · build (warnings as errors) + test
+    runs-on: ubuntu-latest
+    container: swift:6.0.3-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      # A no-op `swift build` prints "Build complete!" and compiles nothing, so
+      # the warning gate only means something on a cold tree.
+      - name: Build with warnings as errors
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+  macos:
+    name: macOS · build for iOS Simulator
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # `generic/platform=iOS Simulator` compiles without requiring any
+      # simulator *runtime* to be installed on the runner image. Pinning a
+      # device name (`name=iPhone 16,OS=latest`) ties the job to whichever
+      # runtimes that day's image happens to ship, which is not guaranteed and
+      # fails with "Unable to find a device matching the provided destination
+      # specifier" on a commit that changed nothing.
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme AdaptiveTransfer \
+            -destination 'generic/platform=iOS Simulator'
+
+      - name: Test on macOS
+        run: swift test
