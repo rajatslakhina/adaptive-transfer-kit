@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 @testable import AdaptiveTransfer
 
 final class ChunkPlannerTests: XCTestCase {
@@ -82,6 +83,29 @@ final class ChunkPlannerTests: XCTestCase {
         XCTAssertTrue(overflowing.range.isEmpty)
 
         let ordinary = ChunkDescriptor(index: 2, offset: 200, byteCount: 100)
+        XCTAssertEqual(ordinary.range, 200..<300)
+    }
+
+    /// The clamp has to hold on the *decode* path, which is the path its own
+    /// documentation names. A synthesized `init(from:)` writes the stored
+    /// properties directly, so an earlier version of this test — which only
+    /// exercised the memberwise initializer — passed while the decode path was
+    /// completely unprotected.
+    func testDecodingAChunkDescriptorAlsoClamps() throws {
+        let hostile = #"{"index":-7,"offset":-3,"byteCount":-9223372036854775808}"#
+        let decoded = try JSONDecoder().decode(
+            ChunkDescriptor.self,
+            from: Data(hostile.utf8)
+        )
+        XCTAssertEqual(decoded.index, 0)
+        XCTAssertEqual(decoded.offset, 0)
+        XCTAssertEqual(decoded.byteCount, 0)
+        XCTAssertEqual(decoded.range, 0..<0)
+
+        let ordinary = try JSONDecoder().decode(
+            ChunkDescriptor.self,
+            from: Data(#"{"index":2,"offset":200,"byteCount":100}"#.utf8)
+        )
         XCTAssertEqual(ordinary.range, 200..<300)
     }
 

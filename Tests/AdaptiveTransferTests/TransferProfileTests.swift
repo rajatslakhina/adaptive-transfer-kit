@@ -33,13 +33,22 @@ final class TransferProfileTests: XCTestCase {
     /// and dead across the middle.
     func testEveryReachableSliderPositionChangesSomething() {
         let profile = TransferProfile.photoUpload
-        let results = profile.degradedCapacityRange.map {
-            profile.compare(degradedCapacity: $0).fixed
+        let comparisons = profile.degradedCapacityRange.map {
+            profile.compare(degradedCapacity: $0)
         }
+
+        // Both strategies, not just the fixed one. Checking only the fixed
+        // side would still pass with `GradientLimiter.observe(_:)` gutted to a
+        // no-op — the dashboard renders two cards and the claim is about both.
+        let fixedTimes = comparisons.map(\.fixed.completionMilliseconds)
+        let adaptiveTimes = comparisons.map(\.adaptive.completionMilliseconds)
         XCTAssertEqual(
-            Set(results.map(\.completionMilliseconds)).count,
-            results.count,
-            "two slider positions produced identical completion times: \(results.map(\.completionMilliseconds))"
+            Set(fixedTimes).count, comparisons.count,
+            "two slider positions gave the fixed strategy identical times: \(fixedTimes)"
+        )
+        XCTAssertEqual(
+            Set(adaptiveTimes).count, comparisons.count,
+            "two slider positions gave the adaptive strategy identical times: \(adaptiveTimes)"
         )
     }
 
@@ -72,17 +81,51 @@ final class TransferProfileTests: XCTestCase {
         )
     }
 
-    /// And the honest other half: at mild degradation the fixed guess really
-    /// does win, the verdict says so rather than spinning it, and the UI has a
-    /// branch for it. A demo that could not reach this state would be a sales
-    /// pitch.
+    /// And the honest other half: where the server barely degrades, the fixed
+    /// guess really does win, the verdict says so rather than spinning it, and
+    /// the UI has a branch for it. A demo that could not reach this state would
+    /// be a sales pitch.
+    ///
+    /// Note the range: a capacity equal to `serverCapacity` is no degradation
+    /// at all, so the interesting boundary is just below it.
     func testMildDegradationIsReportedAsAWinForTheFixedGuess() {
         let profile = TransferProfile.photoUpload
-        let comparison = profile.compare(degradedCapacity: profile.serverCapacity)
+        for capacity in 4...profile.serverCapacity {
+            XCTAssertEqual(
+                profile.verdict(for: profile.compare(degradedCapacity: capacity)),
+                .fixedGuessHappenedToBeRight,
+                "capacity \(capacity)"
+            )
+        }
+    }
+
+    /// The whole slider, as a table. A reader of the README can check the
+    /// distribution of verdicts against this rather than take the prose on
+    /// trust, and a control law change that quietly moves the boundary turns it
+    /// red.
+    func testTheVerdictDistributionAcrossTheSlider() {
+        let profile = TransferProfile.photoUpload
+        let verdicts = profile.degradedCapacityRange.map {
+            profile.verdict(for: profile.compare(degradedCapacity: $0))
+        }
         XCTAssertEqual(
-            profile.verdict(for: comparison),
-            .fixedGuessHappenedToBeRight
+            verdicts,
+            [.fixedLimitCollapsed, .adaptiveWins, .adaptiveWins]
+                + Array(repeating: .fixedGuessHappenedToBeRight, count: 5)
         )
+    }
+
+    /// An absurd chunk count must be bounded rather than allocated. The
+    /// simulation materialises one element per chunk before its loop starts,
+    /// so an unbounded count is a segfault behind an innocuous `Int`.
+    func testAnAbsurdChunkCountIsBoundedRatherThanAllocated() {
+        let profile = TransferProfile(name: "absurd", chunkCount: Int.max)
+        XCTAssertEqual(profile.chunkCount, CapacityExperiment.Scenario.maximumChunkCount)
+        let scenario = CapacityExperiment.Scenario(
+            chunkCount: Int.max,
+            server: SimulatedServer()
+        )
+        XCTAssertEqual(scenario.chunkCount, CapacityExperiment.Scenario.maximumChunkCount)
     }
 
     func testSevereDegradationCollapsesTheFixedLimit() {

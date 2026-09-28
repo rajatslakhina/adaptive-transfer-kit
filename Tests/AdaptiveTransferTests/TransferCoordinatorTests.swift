@@ -339,6 +339,49 @@ final class TransferCoordinatorTests: XCTestCase {
         XCTAssertTrue(second.isComplete)
     }
 
+    /// Every chunk must end up either acknowledged or reported as failed.
+    ///
+    /// The retry path was fixed to check `requeue`'s result; the *admission*
+    /// path was still discarding `enqueue`'s. With a plan larger than the
+    /// scheduler's queue cap, the surplus descriptors were dropped on the floor
+    /// and the transfer ended neither complete nor with those indices in
+    /// `terminallyFailedChunks` — the outcome the fix was written to prevent,
+    /// surviving on the sibling call in the same function.
+    ///
+    /// The queue is now sized from the plan, so this asserts the accounting
+    /// identity directly rather than the mechanism.
+    func testEveryChunkIsEitherAcknowledgedOrReportedAsFailed() async throws {
+        // A planner configured for fine resumption granularity on a large file
+        // — exactly what the package's own documentation argues for — which
+        // used to exceed the scheduler's default cap.
+        let finePlanner = ChunkPlanner(
+            configuration: .init(
+                preferredChunkSize: 10,
+                minimumChunkSize: 10,
+                maximumChunkCount: 20_000
+            )
+        )
+        let coordinator = TransferCoordinator(
+            transport: ScriptedTransport(),
+            planner: finePlanner,
+            policy: fastPolicy
+        )
+        let outcome = try await coordinator.upload(
+            request(totalBytes: 200_000, payload: "big")
+        )
+
+        XCTAssertEqual(outcome.manifest.chunkCount, 20_000)
+        XCTAssertEqual(
+            Saturating.add(
+                outcome.manifest.acknowledgedCount,
+                outcome.terminallyFailedChunks.count
+            ),
+            outcome.manifest.chunkCount,
+            "chunks went missing: neither acknowledged nor reported as failed"
+        )
+        XCTAssertTrue(outcome.isComplete)
+    }
+
     /// The limit is meant to bound real concurrency, not just be reported. A
     /// transport that records its own high-water mark is the only way to tell
     /// the difference between a working limiter and a serial upload loop that

@@ -92,7 +92,7 @@ final class CapacityExperimentTests: XCTestCase {
 
     func testTheAdaptiveControllerConvergesNearActualCapacity() {
         let comparison = CapacityExperiment.compare()
-        // Capacity ends at 3. The controller should settle in that
+        // Capacity ends at 2. The controller should settle in that
         // neighbourhood rather than at the fixed 8 it started near.
         XCTAssertLessThan(comparison.adaptive.finalLimit, 8)
         XCTAssertGreaterThanOrEqual(comparison.adaptive.finalLimit, 1)
@@ -115,12 +115,13 @@ final class CapacityExperimentTests: XCTestCase {
         XCTAssertEqual(result.throughputPerSecond, 0)
     }
 
-    /// `percentile` is nearest-rank over a sorted array, so asserting
+    /// `percentile` is floor-rank over a sorted array — `index = floor(p * n /
+    /// 100) - 1`, clamped — so asserting
     /// `p50 <= p95 <= p99` would be asserting something the implementation
     /// computes by construction. These are the cases where it could actually be
     /// wrong: the clamps at both ends, and a known fixture where the answer can
     /// be worked out by hand.
-    func testPercentileIsNearestRankAndClampsItsInput() {
+    func testPercentileIsFloorRankAndClampsItsInput() {
         let result = CapacityExperiment.Result(
             completionMilliseconds: 1_000,
             completedChunks: 10,
@@ -130,7 +131,11 @@ final class CapacityExperimentTests: XCTestCase {
             finalLimit: 4
         )
         XCTAssertEqual(result.percentile(50), 50)     // rank 5 -> index 4
-        XCTAssertEqual(result.percentile(95), 90)      // rank 9 (integer division) -> index 8
+        // Floor-rank, deliberately: rank = floor(95 * 10 / 100) = 9 -> index 8.
+        // Nearest-rank would round the rank up and give 100. The two agree on
+        // the 300-sample runs this package publishes; they differ here, and the
+        // implementation is named for what it does.
+        XCTAssertEqual(result.percentile(95), 90)
         XCTAssertEqual(result.percentile(10), 10)
         XCTAssertEqual(result.percentile(100), 100)
         XCTAssertEqual(result.percentile(0), 10)      // clamped to the first

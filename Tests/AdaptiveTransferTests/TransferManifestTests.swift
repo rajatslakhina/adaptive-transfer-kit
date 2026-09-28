@@ -144,14 +144,41 @@ final class TransferManifestTests: XCTestCase {
           "digests": { "999999": { "value": 7 } }
         }
         """
-        let decoded = try JSONDecoder().decode(
-            TransferManifest.self,
-            from: Data(hostile.utf8)
-        )
-        XCTAssertEqual(decoded.chunkCount, 0)
-        XCTAssertEqual(decoded.chunkSize, 0)
-        XCTAssertEqual(decoded.acknowledged, [])
+        // A negative chunk count is corruption, not an empty plan. Clamping it
+        // to zero would turn it into a manifest that `isComplete` reports as
+        // finished — the exact symptom the hand-written initializer exists to
+        // remove — so it is refused instead.
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(TransferManifest.self, from: Data(hostile.utf8))
+        ) { error in
+            guard case DecodingError.dataCorrupted = error else {
+                return XCTFail("expected a dataCorrupted error, got \(error)")
+            }
+        }
+    }
+
+    /// And the non-negative case: out-of-range indices are dropped, and the
+    /// result must not read as a completed transfer.
+    func testDecodingDropsOutOfRangeIndicesWithoutFakingCompletion() throws {
+        let json = """
+        {
+          "transferID": "t1",
+          "chunkCount": 10,
+          "chunkSize": 100,
+          "fingerprint": {
+            "totalBytes": 1000,
+            "prefixDigest": { "value": 1 },
+            "prefixByteCount": 1000
+          },
+          "acknowledgedIndices": [0, 1, -3, 10, 999999],
+          "digests": { "999999": { "value": 7 } }
+        }
+        """
+        let decoded = try JSONDecoder().decode(TransferManifest.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.chunkCount, 10)
+        XCTAssertEqual(decoded.acknowledged, [0, 1])
         XCTAssertNil(decoded.digest(forChunkIndex: 999_999))
+        XCTAssertFalse(decoded.isComplete, "a partial manifest must not read as complete")
     }
 
     func testDecodingKeepsIndicesThatAreInRange() throws {
