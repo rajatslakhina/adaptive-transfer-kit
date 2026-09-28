@@ -7,14 +7,28 @@ public struct ChunkDescriptor: Sendable, Equatable, Hashable, Codable {
     /// Length in bytes. Always `> 0`.
     public let byteCount: Int
 
+    /// Clamps its inputs rather than trusting them.
+    ///
+    /// This initializer is public and the type is `Codable`, so its arguments
+    /// can arrive from a decoded manifest written by an older build or a
+    /// different process — not only from `ChunkPlanner`. Without the clamp a
+    /// negative `byteCount` produces a `Range` whose `lowerBound` exceeds its
+    /// `upperBound`, and `Range.init` traps on that. Saturating the arithmetic
+    /// is not enough on its own when the saturated result is then handed to a
+    /// type with its own precondition.
     public init(index: Int, offset: Int, byteCount: Int) {
-        self.index = index
-        self.offset = offset
-        self.byteCount = byteCount
+        self.index = max(0, index)
+        self.offset = max(0, offset)
+        self.byteCount = max(0, byteCount)
     }
 
-    /// Byte range, half-open.
-    public var range: Range<Int> { offset..<Saturating.add(offset, byteCount) }
+    /// Byte range, half-open. Never trapping: `byteCount` is non-negative by
+    /// construction and the upper bound saturates rather than overflowing, so
+    /// `lowerBound <= upperBound` always holds.
+    public var range: Range<Int> {
+        let upper = Saturating.add(offset, byteCount)
+        return offset..<max(offset, upper)
+    }
 }
 
 /// Splits a payload into chunks, and decides how big a chunk should be.

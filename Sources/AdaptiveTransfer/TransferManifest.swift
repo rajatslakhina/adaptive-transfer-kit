@@ -21,13 +21,24 @@
 /// why the digest is over the *plan shape plus a sampled prefix*, not the whole
 /// payload — see `SourceFingerprint`.
 ///
-/// ## Bounded by construction
+/// ## Bounded on both of its entry paths
 ///
-/// `acknowledged` can never exceed the chunk count, because
 /// `acknowledge(chunkIndex:)` rejects out-of-range indices instead of inserting
-/// them. Without that, a buggy or hostile server acknowledging index
-/// `Int.random()` grows the set without limit and the manifest write gets
-/// slower on every chunk.
+/// them; without that, a server acknowledging index `Int.random()` grows the set
+/// without limit and the manifest write gets slower on every chunk.
+///
+/// That guard alone is not enough, and the gap is the interesting part. This
+/// type is `Codable` and is loaded from disk by `ManifestStore`, so the *other*
+/// way state gets in is `init(from:)` — which, synthesized, writes straight to
+/// the stored properties and honours no invariant at all. A manifest file
+/// truncated by a crash, written by an older build, or simply corrupted could
+/// therefore decode with `chunkCount` negative and a hundred thousand
+/// acknowledged indices, and `isComplete` would return `true` for a transfer
+/// that had uploaded nothing.
+///
+/// So `init(from:)` is written by hand and re-applies the same bounds. An
+/// invariant that holds only on the path the author happened to think about is
+/// not an invariant.
 public struct TransferManifest: Sendable, Equatable, Codable {
 
     /// Cheap stand-in for "are these the same bytes".
@@ -123,6 +134,29 @@ public struct TransferManifest: Sendable, Equatable, Codable {
     /// changed under us, so nothing already on the server can be trusted.
     /// Returns an empty array when the plan's shape disagrees with the
     /// manifest's, for the same reason.
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case transferID, chunkCount, chunkSize, fingerprint
+        case acknowledgedIndices, digests
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.transferID = try container.decode(String.self, forKey: .transferID)
+        let decodedChunkCount = try container.decode(Int.self, forKey: .chunkCount)
+        let decodedChunkSize = try container.decode(Int.self, forKey: .chunkSize)
+        self.chunkCount = max(0, decodedChunkCount)
+        self.chunkSize = max(0, decodedChunkSize)
+        self.fingerprint = try container.decode(SourceFingerprint.self, forKey: .fingerprint)
+
+        let indices = try container.decode(Set<Int>.self, forKey: .acknowledgedIndices)
+        let digests = try container.decode([Int: ContentDigest].self, forKey: .digests)
+        let valid = 0..<self.chunkCount
+        self.acknowledgedIndices = indices.filter { valid.contains($0) }
+        self.digests = digests.filter { valid.contains($0.key) }
+    }
+
     public func resumePlan(
         for plan: [ChunkDescriptor],
         fingerprint current: SourceFingerprint

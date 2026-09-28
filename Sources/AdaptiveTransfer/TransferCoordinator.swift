@@ -1,3 +1,10 @@
+/// Why a transfer could not be started.
+public enum TransferCoordinatorError: Error, Sendable, Equatable {
+    /// This coordinator is already running a transfer. Use one coordinator per
+    /// concurrent transfer; see the note on `TransferCoordinator`.
+    case busy
+}
+
 /// What a caller asks for.
 public struct TransferRequest: Sendable, Equatable {
     public let transferID: String
@@ -71,6 +78,24 @@ public actor InMemoryManifestStore: ManifestStore {
 /// interleave and corrupt the limit?" — has a mechanical answer instead of a
 /// careful argument.
 ///
+/// ## One transfer at a time, enforced rather than documented
+///
+/// Every piece of state below — limiter, scheduler, budget, manifest — belongs
+/// to *one* transfer. A second concurrent `upload(_:)` on the same coordinator
+/// would reset all of it mid-flight, and the first call would then return the
+/// second transfer's manifest as its own result: a 300-chunk upload reporting
+/// `isComplete == true` while carrying a 3-chunk manifest, with no error
+/// anywhere. Actor isolation does not prevent this, because the corruption
+/// happens across the `await store.load(...)` suspension inside a single
+/// `upload` call, not between two synchronous mutations.
+///
+/// A comment saying "call this once at a time" would be worth nothing. So the
+/// coordinator holds a claim flag, takes it synchronously before the first
+/// suspension, and throws `TransferCoordinatorError.busy` on a second entrant.
+/// Concurrent transfers are supported by making a coordinator per transfer —
+/// they are cheap — which also gives each one its own capacity estimate, and a
+/// per-destination estimate is the more correct default anyway.
+///
 /// ## The reentrancy rule, stated so it can be checked
 ///
 /// Swift actors are reentrant: an `await` inside an actor method releases the
@@ -125,6 +150,7 @@ public actor TransferCoordinator {
     private var manifest: TransferManifest?
     private var terminalChunks: Set<Int> = []
     private var jitter = JitterSource(seed: 0xA11C_E000)
+    private var isUploading = false
 
     /// Uploads `request`, resuming from the stored manifest if one is usable.
     ///
@@ -136,6 +162,11 @@ public actor TransferCoordinator {
     /// limit. A shrinking limit therefore takes effect on the next completion,
     /// not on the next transfer.
     public func upload(_ request: TransferRequest) async throws -> TransferOutcome {
+        // Claimed synchronously, before any `await`, so two callers cannot both
+        // observe it as free. Released on every exit path.
+        try claim()
+        defer { release() }
+
         let plan = planner.plan(totalBytes: request.totalBytes)
         let chunkSize = planner.chunkSize(forTotalBytes: request.totalBytes)
 
@@ -200,6 +231,15 @@ public actor TransferCoordinator {
     }
 
     // MARK: - Critical sections. No `await` below this line.
+
+    private func claim() throws {
+        guard !isUploading else { throw TransferCoordinatorError.busy }
+        isUploading = true
+    }
+
+    private func release() {
+        isUploading = false
+    }
 
     private func resolve(
         stored: TransferManifest?,
@@ -300,7 +340,14 @@ public actor TransferCoordinator {
                 beforeAttempt: Saturating.add(attempts, 1),
                 jitter: &jitter
             )
-            scheduler.requeue(retry)
+            // The result is checked, not discarded. `requeue` releases the
+            // in-flight slot *before* it re-enqueues, so a full queue would
+            // otherwise drop the chunk silently — the transfer would end
+            // neither complete nor with that index reported as failed, which is
+            // the one outcome a transfer library must never produce.
+            if !scheduler.requeue(retry) {
+                terminalChunks.insert(item.descriptor.index)
+            }
         }
     }
 

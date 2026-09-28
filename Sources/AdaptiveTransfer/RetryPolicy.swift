@@ -116,7 +116,7 @@ public struct RetryPolicy: Sendable {
 /// *every* chunk is failing retry 800 times before giving up, which is worse
 /// for the user and for the server than failing fast.
 ///
-/// `RetryBudgetTests` asserts both halves: the healthy chunks complete under
+/// `RetryTests` asserts both halves: the healthy chunks complete under
 /// the default policy, and — wiring in `.globalOnly` — that they do **not**.
 public struct RetryBudget: Sendable {
 

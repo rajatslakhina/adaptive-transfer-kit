@@ -222,7 +222,7 @@ public struct CapacityExperiment: Sendable {
 
     /// Runs the same scenario against a fixed limit and against the gradient
     /// controller, so the two can be compared on identical conditions.
-    public struct Comparison: Sendable {
+    public struct Comparison: Sendable, Equatable {
         public let fixed: Result
         public let adaptive: Result
         public let fixedLimit: Int
