@@ -25,7 +25,11 @@ let package = Package(
         ),
         .testTarget(
             name: "AdaptiveTransferTests",
-            dependencies: ["AdaptiveTransfer"],
+            // Depends on the UI module too, even though everything in it is
+            // behind `#if canImport(SwiftUI)` and compiles to nothing on Linux.
+            // The first cut of this package shipped its only real defect in
+            // that module precisely because nothing referenced it.
+            dependencies: ["AdaptiveTransfer", "AdaptiveTransferUI"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]

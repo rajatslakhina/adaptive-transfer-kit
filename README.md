@@ -91,9 +91,11 @@ The controller is not free and the table says so.
   otherwise would be dishonest.
 
 So the claim is not "adaptive is faster". The claim is narrower and harder to
-argue with: **the controller does not have to be right in advance, and its worst
-case is a 705 ms tail on 4% of chunks, while a wrong guess's worst case is a
-transfer that never finishes.** `testAPerfectlyTunedFixedGuessStillBeatsTheController`
+argue with: **the controller does not have to be right in advance, and its
+worst case is bounded, while a wrong guess's worst case is a transfer that never
+finishes.** Bounded means, concretely: 12 of 300 chunks had an attempt shed
+during the controller's startup overshoot, and the slowest 1% of chunks waited
+705 ms. A fixed limit of 16 leaves 245 chunks unsent after ten minutes. `testAPerfectlyTunedFixedGuessStillBeatsTheController`
 asserts the counter-evidence, on purpose — a suite that only held results
 flattering the thing it tests would not be worth reading.
 
@@ -238,6 +240,29 @@ enforces atomicity for free. The network call lives in a `nonisolated static`
 function that has no access to actor state at all — so a reviewer verifies the
 rule by grepping for `await`, not by tracing control flow.
 
+### One transfer per coordinator, enforced rather than documented
+
+Every piece of the coordinator's state belongs to one transfer. A second
+concurrent `upload(_:)` on the same instance would reset the limiter, scheduler,
+budget and manifest mid-flight — and the *first* call would then return the
+second transfer's manifest as its own result: a 300-chunk upload reporting
+`isComplete == true` while carrying a 3-chunk manifest, with no error raised
+anywhere.
+
+Actor isolation does not prevent that, which is the part worth internalising.
+The corruption happens across the `await store.load(...)` suspension *inside a
+single call*, not between two synchronous mutations, so the no-`await`-in-
+critical-sections rule above is necessary and not sufficient. A doc comment
+saying "call this one at a time" would have been worth nothing. So the
+coordinator takes a claim flag synchronously before its first suspension and
+throws `TransferCoordinatorError.busy` on a second entrant, and
+`testASecondConcurrentUploadIsRejectedRatherThanCorruptingTheFirst` asserts both
+the rejection and that the surviving transfer's manifest is still its own.
+
+Concurrent transfers are served by one coordinator each — they are cheap — which
+also gives each destination its own capacity estimate, and a per-destination
+estimate is the more correct default anyway.
+
 ### Trapping arithmetic is centralised, not guarded case by case
 
 The control loop converts measurements to counts, and every one of those
@@ -251,11 +276,18 @@ written as a 64-bit literal, because `Int` is 32 bits on watchOS.
 obvious way — including `Saturating.int(Double(Int.max))`, where `Double(Int.max)`
 rounds *up* to 2^63 and the naive conversion back traps.
 
+Saturating the arithmetic is necessary and not sufficient, which an earlier cut
+of this package proved the hard way: `ChunkDescriptor.range` computed its upper
+bound with `Saturating.add` and then handed the result to `Range`, whose own
+precondition traps when the lower bound exceeds the upper. `ChunkDescriptor` is
+public and `Codable`, so a negative `byteCount` could arrive from a decoded
+manifest and crash. The initializer now clamps, and `range` cannot invert.
+
 ---
 
 ## No vacuous tests
 
-101 XCTest cases, and the ones that matter are the ones that would fail if the
+113 XCTest cases, and the ones that matter are the ones that would fail if the
 implementation were gutted.
 
 `LimiterInvariantCheck` states what "adaptive" has to mean — sustained queueing
@@ -285,7 +317,7 @@ was serial and passed every other test.
 ## Using it
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/adaptive-transfer-kit.git", from: "1.0.0")
+.package(url: "https://github.com/rajatslakhina/adaptive-transfer-kit.git", from: "1.1.0")
 ```
 
 ```swift
@@ -320,8 +352,21 @@ response to its own queueing.
 
 | module | what is in it | platforms |
 |---|---|---|
-| `AdaptiveTransfer` | the whole policy core, the coordinator, the simulation. No I/O, no `Foundation` beyond `pow`. | iOS 17+, macOS 14+, Linux |
-| `AdaptiveTransferUI` | `TransferDashboardView` — the comparison above, live, with a slider for how hard the server degrades | iOS 17+, macOS 14+ |
+| `AdaptiveTransfer` | the whole policy core, the coordinator, the simulation, and `TransferProfile`. No I/O; no `Foundation` at all — `RetryPolicy` imports `Darwin`/`Glibc` for `pow` and nothing else does. | iOS 17+, macOS 14+, Linux |
+| `AdaptiveTransferUI` | `TransferDashboardView` only — the drawing, and nothing that makes a decision | iOS 17+, macOS 14+ |
+
+Every type that holds a *decision* lives in the core module, including
+`TransferProfile`, which the demo app uses to choose chunk count and the
+concurrency ceiling. That placement is deliberate and was a correction: the UI
+module is entirely inside `#if canImport(SwiftUI)`, so on Linux it compiles to
+nothing and the test target cannot reach it. A type that decides what the demo
+computes was therefore, structurally, a type no test could see — and that is
+exactly where this package's first cut shipped its only real defect: a slider
+that recomputed faithfully and produced byte-identical numbers at every
+position, because the modelled server degraded *after* the modelled transfer had
+already finished. `TransferProfileTests` now asserts that every reachable slider
+position changes the outcome, and that the degradation lands before either
+strategy could finish.
 
 ---
 
@@ -339,7 +384,10 @@ build` on an up-to-date tree compiles nothing and still prints `Build complete!`
 That is why the flag lives in the Linux CI job rather than in a claim in this
 file.
 
-**Demo app:** _(added after the companion repo is pushed — see below)_
+**Demo app:** [`adaptive-transfer-kit-demo-app`](https://github.com/rajatslakhina/adaptive-transfer-kit-demo-app)
+— a SwiftUI app that consumes this package as a version-pinned remote
+dependency and renders the comparison above live, with a slider for how hard the
+server degrades.
 
 ---
 
@@ -350,11 +398,13 @@ conflating them is how a README stops being trustworthy.
 
 * `swift build -Xswiftc -warnings-as-errors` on a cold tree (`.build` removed):
   **clean, zero warnings**, Swift 6.0.3, Linux x86_64.
-* `swift test`: **101 tests, 0 failures.**
-* Every number in the table above is printed by
-  `CapacityExperimentTests.testPublishNumbersForTheReadme` and its neighbours
-  assert the shape of each claim, so a regression in the control law turns those
-  tests red rather than quietly making this file wrong.
+* `swift test`: **113 tests, 0 failures.**
+* Every number in the table above is asserted **exactly** by
+  `CapacityExperimentTests.testPublishedFiguresAreExact` and
+  `testPublishedCollapseFiguresAreExact`, so a regression in the control law
+  turns those tests red rather than quietly making this file wrong. (An earlier
+  version only asserted loose bounds and printed the figures — which let the
+  table drift, and is the reason exact assertions are there now.)
 * The numbers are produced by a **deterministic queueing model in virtual time,
   not by a device on a network.** The model is stated in `SimulatedServer`'s
   documentation so it can be argued with. It deliberately omits TCP slow start,
