@@ -281,13 +281,17 @@ of this package proved the hard way: `ChunkDescriptor.range` computed its upper
 bound with `Saturating.add` and then handed the result to `Range`, whose own
 precondition traps when the lower bound exceeds the upper. `ChunkDescriptor` is
 public and `Codable`, so a negative `byteCount` could arrive from a decoded
-manifest and crash. The initializer now clamps, and `range` cannot invert.
+manifest and crash. The initializer now clamps, `init(from:)` routes decoding through it, and
+`range` cannot invert. The first cut of *that* fix clamped only the memberwise
+initializer — leaving the decode path, the one the doc comment named, entirely
+unprotected, with a test whose comment described the decode path and whose body
+never used it.
 
 ---
 
 ## No vacuous tests
 
-113 XCTest cases, and the ones that matter are the ones that would fail if the
+118 XCTest cases, and the ones that matter are the ones that would fail if the
 implementation were gutted.
 
 `LimiterInvariantCheck` states what "adaptive" has to mean — sustained queueing
@@ -398,7 +402,7 @@ conflating them is how a README stops being trustworthy.
 
 * `swift build -Xswiftc -warnings-as-errors` on a cold tree (`.build` removed):
   **clean, zero warnings**, Swift 6.0.3, Linux x86_64.
-* `swift test`: **113 tests, 0 failures.**
+* `swift test`: **118 tests, 0 failures.**
 * Every number in the table above is asserted **exactly** by
   `CapacityExperimentTests.testPublishedFiguresAreExact` and
   `testPublishedCollapseFiguresAreExact`, so a regression in the control law
