@@ -1,0 +1,74 @@
+import XCTest
+@testable import AdaptiveTransfer
+
+final class ChunkPlannerTests: XCTestCase {
+
+    func testZeroBytesProducesNoChunks() {
+        // Not one empty chunk: a chunk with nothing to acknowledge would leave
+        // every caller that waits for "no chunks left" waiting forever.
+        XCTAssertTrue(ChunkPlanner().plan(totalBytes: 0).isEmpty)
+    }
+
+    func testNegativeTotalProducesNoChunks() {
+        XCTAssertTrue(ChunkPlanner().plan(totalBytes: -1).isEmpty)
+        XCTAssertTrue(ChunkPlanner().plan(totalBytes: Int.min).isEmpty)
+    }
+
+    func testChunksCoverThePayloadExactlyWithNoGapsOrOverlaps() {
+        let planner = ChunkPlanner(
+            configuration: .init(preferredChunkSize: 1_000, minimumChunkSize: 100)
+        )
+        for total in [1, 999, 1_000, 1_001, 3_500, 10_000] {
+            let plan = planner.plan(totalBytes: total)
+            XCTAssertEqual(plan.map(\.byteCount).reduce(0, +), total, "total \(total)")
+            XCTAssertEqual(plan.first?.offset, 0, "total \(total)")
+            for (previous, next) in zip(plan, plan.dropFirst()) {
+                XCTAssertEqual(previous.range.upperBound, next.offset, "total \(total)")
+            }
+            XCTAssertEqual(plan.last?.range.upperBound, total, "total \(total)")
+            XCTAssertEqual(plan.map(\.index), Array(0..<plan.count), "total \(total)")
+            XCTAssertTrue(plan.allSatisfy { $0.byteCount > 0 }, "total \(total)")
+        }
+    }
+
+    /// The memory bound. A 40 GB file at a 1 MiB chunk size is 40,960
+    /// descriptors; the planner has to grow the chunk size instead of the
+    /// count, and degrade resumption granularity rather than the process.
+    func testChunkCountIsBoundedAndSizeGrowsInstead() {
+        let planner = ChunkPlanner(
+            configuration: .init(preferredChunkSize: 1 << 20, maximumChunkCount: 1_000)
+        )
+        let fortyGigabytes = 40 * (1 << 30)
+        let plan = planner.plan(totalBytes: fortyGigabytes)
+        XCTAssertLessThanOrEqual(plan.count, 1_000)
+        XCTAssertGreaterThan(planner.chunkSize(forTotalBytes: fortyGigabytes), 1 << 20)
+        XCTAssertEqual(plan.map(\.byteCount).reduce(0, +), fortyGigabytes)
+    }
+
+    func testChunkCountStaysBoundedAtIntMax() {
+        // `Int.max` bytes is not a real file; it is what an overflowed size
+        // calculation upstream produces, and it must not allocate.
+        let planner = ChunkPlanner(configuration: .init(maximumChunkCount: 512))
+        XCTAssertLessThanOrEqual(planner.plan(totalBytes: Int.max).count, 512)
+    }
+
+    func testConfigurationSanitisesSizes() {
+        let configuration = ChunkPlanner.Configuration(
+            preferredChunkSize: 10,
+            minimumChunkSize: 5_000,
+            maximumChunkCount: 0
+        )
+        XCTAssertEqual(configuration.minimumChunkSize, 5_000)
+        XCTAssertEqual(configuration.preferredChunkSize, 5_000)
+        XCTAssertEqual(configuration.maximumChunkCount, 1)
+    }
+
+    func testSmallPayloadUsesThePreferredSize() {
+        let planner = ChunkPlanner(
+            configuration: .init(preferredChunkSize: 4_096, minimumChunkSize: 512)
+        )
+        XCTAssertEqual(planner.chunkSize(forTotalBytes: 100), 4_096)
+        XCTAssertEqual(planner.plan(totalBytes: 100).count, 1)
+        XCTAssertEqual(planner.plan(totalBytes: 100).first?.byteCount, 100)
+    }
+}
