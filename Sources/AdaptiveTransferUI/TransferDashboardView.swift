@@ -43,6 +43,13 @@ public struct TransferDashboardView: View {
 
     @StateObject private var model: TransferDashboardModel
 
+    /// `StateObject(wrappedValue:)` evaluates its argument on every `init`,
+    /// even when SwiftUI keeps the object it already has — so the two
+    /// simulations run once per view init, not once per model. That is
+    /// acceptable here because this view is the root of a `WindowGroup` and is
+    /// initialised once; it would be wrong the moment the view were reused
+    /// inside a list, where the fix is to construct the model outside and pass
+    /// it in. Noted rather than silently relied upon.
     public init(profile: TransferProfile = .photoUpload) {
         _model = StateObject(wrappedValue: TransferDashboardModel(profile: profile))
     }
@@ -129,16 +136,25 @@ public struct TransferDashboardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// A "how bad was it" bar, not a p95 bar.
+    ///
+    /// Normalising on p95 alone is actively misleading in the one state that
+    /// most damns a fixed limit: when the fixed strategy sheds its way to 44
+    /// of 300 chunks, the survivors were *fast*, so its p95 is small and the
+    /// bar would have made the failing card look best on screen. So a strategy
+    /// that did not finish is drawn full width regardless of its latency — the
+    /// loudest visual has to agree with the verdict.
     private func latencyBar(result: CapacityExperiment.Result, tint: Color) -> some View {
+        let didNotFinish = result.completedChunks < model.profile.chunkCount
         let worst = max(
             model.comparison.fixed.p95LatencyMilliseconds,
             model.comparison.adaptive.p95LatencyMilliseconds
         )
         // Guarded rather than divided: both p95s are zero whenever nothing
         // completed, and a NaN width is a crash inside SwiftUI's layout pass.
-        let fraction = worst > 0
-            ? Double(result.p95LatencyMilliseconds) / Double(worst)
-            : 0
+        let fraction = didNotFinish
+            ? 1.0
+            : (worst > 0 ? Double(result.p95LatencyMilliseconds) / Double(worst) : 0)
         return GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 Capsule().fill(tint.opacity(0.15))
@@ -146,7 +162,11 @@ public struct TransferDashboardView: View {
             }
         }
         .frame(height: 8)
-        .accessibilityLabel("p95 latency \(result.p95LatencyMilliseconds) milliseconds")
+        .accessibilityLabel(
+            didNotFinish
+                ? "did not finish: \(result.completedChunks) of \(model.profile.chunkCount) chunks"
+                : "p95 latency \(result.p95LatencyMilliseconds) milliseconds"
+        )
     }
 
     /// The honest reading, including the case where the guess wins.
